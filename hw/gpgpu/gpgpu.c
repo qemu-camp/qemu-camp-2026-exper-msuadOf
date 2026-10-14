@@ -22,13 +22,21 @@
 #include "gpgpu.h"
 #include "gpgpu_core.h"
 
-/* TODO: Implement MMIO control register read */
 static uint64_t gpgpu_ctrl_read(void *opaque, hwaddr addr, unsigned size)
 {
-    (void)opaque;
-    (void)addr;
-    (void)size;
-    return 0;
+    GPGPUState *s = opaque;
+
+    switch (addr) {
+    case GPGPU_REG_DEV_ID:
+        return GPGPU_DEV_ID_VALUE;
+    case GPGPU_REG_DEV_VERSION:
+        return GPGPU_DEV_VERSION_VALUE;
+    case GPGPU_REG_DEV_CAPS:
+        return (s->num_cus & 0xff) | ((s->warps_per_cu & 0xff) << 8) |
+               ((s->warp_size & 0xff) << 16);
+    default:
+        return 0;
+    }
 }
 
 /* TODO: Implement MMIO control register write */
@@ -45,6 +53,10 @@ static const MemoryRegionOps gpgpu_ctrl_ops = {
     .read = gpgpu_ctrl_read,
     .write = gpgpu_ctrl_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 4,
+        .max_access_size = 4,
+    },
     .impl = {
         .min_access_size = 4,
         .max_access_size = 4,

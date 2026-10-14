@@ -23,6 +23,7 @@
 #include "gpgpu_core.h"
 
 static void gpgpu_reset(DeviceState *dev);
+static void gpgpu_kernel_complete(void *opaque);
 
 static void gpgpu_update_irq(GPGPUState *s, uint32_t events)
 {
@@ -93,6 +94,39 @@ static void gpgpu_start_dma(GPGPUState *s)
 
     s->dma.status = GPGPU_DMA_BUSY;
     timer_mod(s->dma_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1);
+}
+
+static void gpgpu_dispatch_kernel(GPGPUState *s)
+{
+    uint64_t threads = 1, blocks = 1;
+
+    if (!(s->global_ctrl & GPGPU_CTRL_ENABLE) ||
+        (s->global_status & GPGPU_STATUS_BUSY) ||
+        (s->kernel.kernel_addr & 3) || s->vram_size < 4 ||
+        s->kernel.kernel_addr > s->vram_size - 4) {
+        gpgpu_set_error(s, GPGPU_ERR_INVALID_CMD);
+        return;
+    }
+    for (unsigned i = 0; i < 3; i++) {
+        if (!s->kernel.block_dim[i] || !s->kernel.grid_dim[i] ||
+            s->kernel.block_dim[i] > 8192 / threads ||
+            s->kernel.grid_dim[i] > (1u << MHARTID_BLOCK_BITS) / blocks) {
+            gpgpu_set_error(s, GPGPU_ERR_INVALID_CMD);
+            return;
+        }
+        threads *= s->kernel.block_dim[i];
+        blocks *= s->kernel.grid_dim[i];
+    }
+
+    s->global_status &= ~GPGPU_STATUS_READY;
+    s->global_status |= GPGPU_STATUS_BUSY;
+    if (gpgpu_core_exec_kernel(s)) {
+        s->global_status &= ~GPGPU_STATUS_BUSY;
+        s->global_status |= GPGPU_STATUS_READY;
+        gpgpu_set_error(s, GPGPU_ERR_KERNEL_FAULT);
+        return;
+    }
+    gpgpu_kernel_complete(s);
 }
 
 static uint64_t gpgpu_ctrl_read(void *opaque, hwaddr addr, unsigned size)
@@ -224,6 +258,9 @@ static void gpgpu_ctrl_write(void *opaque, hwaddr addr, uint64_t val,
         break;
     case GPGPU_REG_SHARED_MEM_SIZE:
         s->kernel.shared_mem_size = val;
+        break;
+    case GPGPU_REG_DISPATCH:
+        gpgpu_dispatch_kernel(s);
         break;
     case GPGPU_REG_DMA_SRC_LO:
         s->dma.src_addr = (s->dma.src_addr & ~UINT64_C(0xffffffff)) |
@@ -373,16 +410,27 @@ static void gpgpu_dma_complete(void *opaque)
     }
 }
 
-/* TODO: Implement kernel completion handler */
 static void gpgpu_kernel_complete(void *opaque)
 {
-    (void)opaque;
+    GPGPUState *s = opaque;
+
+    s->global_status &= ~GPGPU_STATUS_BUSY;
+    s->global_status |= GPGPU_STATUS_READY;
+    gpgpu_raise_irq(s, GPGPU_IRQ_KERNEL_DONE);
 }
 
 static void gpgpu_realize(PCIDevice *pdev, Error **errp)
 {
     GPGPUState *s = GPGPU(pdev);
     uint8_t *pci_conf = pdev->config;
+
+    if (s->warp_size != GPGPU_WARP_SIZE ||
+        !s->num_cus || s->num_cus > 255 ||
+        !s->warps_per_cu || s->warps_per_cu > 255) {
+        error_setg(errp, "GPGPU: warp_size must be 32; num_cus and "
+                   "warps_per_cu must be between 1 and 255");
+        return;
+    }
 
     if (!is_power_of_2(s->vram_size) ||
         s->vram_size > GPGPU_CORE_CTRL_BASE) {

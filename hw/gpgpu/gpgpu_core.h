@@ -27,6 +27,7 @@ typedef struct GPGPUState GPGPUState;
 #define GPGPU_WARP_SIZE     32      /* 每个 warp 的 lane 数量 */
 #define GPGPU_NUM_REGS      32      /* RISC-V 通用寄存器数量 */
 #define GPGPU_NUM_FREGS     32      /* RISC-V 浮点寄存器数量 */
+#define GPGPU_MAX_CYCLES   100000
 
 /* 浮点 CSR 地址 */
 #define CSR_FFLAGS          0x001
@@ -107,6 +108,8 @@ typedef struct GPGPUWarp {
 #define GPGPU_CORE_CTRL_GRID_DIM_X  (GPGPU_CORE_CTRL_BASE + 0x30)
 #define GPGPU_CORE_CTRL_GRID_DIM_Y  (GPGPU_CORE_CTRL_BASE + 0x34)
 #define GPGPU_CORE_CTRL_GRID_DIM_Z  (GPGPU_CORE_CTRL_BASE + 0x38)
+#define GPGPU_CORE_CTRL_WARP_ID     (GPGPU_CORE_CTRL_BASE + 0x40)
+#define GPGPU_CORE_CTRL_LANE_ID     (GPGPU_CORE_CTRL_BASE + 0x44)
 
 /*
  * ============================================================================

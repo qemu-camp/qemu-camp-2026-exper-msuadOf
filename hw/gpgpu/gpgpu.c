@@ -34,6 +34,10 @@ static uint64_t gpgpu_ctrl_read(void *opaque, hwaddr addr, unsigned size)
     case GPGPU_REG_DEV_CAPS:
         return (s->num_cus & 0xff) | ((s->warps_per_cu & 0xff) << 8) |
                ((s->warp_size & 0xff) << 16);
+    case GPGPU_REG_VRAM_SIZE_LO:
+        return (uint32_t)s->vram_size;
+    case GPGPU_REG_VRAM_SIZE_HI:
+        return s->vram_size >> 32;
     default:
         return 0;
     }
@@ -136,9 +140,16 @@ static void gpgpu_realize(PCIDevice *pdev, Error **errp)
     GPGPUState *s = GPGPU(pdev);
     uint8_t *pci_conf = pdev->config;
 
+    if (!is_power_of_2(s->vram_size) ||
+        s->vram_size > GPGPU_CORE_CTRL_BASE) {
+        error_setg(errp, "GPGPU: vram_size must be a power of two and at "
+                   "most 2 GiB");
+        return;
+    }
+
     pci_config_set_interrupt_pin(pci_conf, 1);
 
-    s->vram_ptr = g_malloc0(s->vram_size);
+    s->vram_ptr = g_try_malloc0(s->vram_size);
     if (!s->vram_ptr) {
         error_setg(errp, "GPGPU: failed to allocate VRAM");
         return;

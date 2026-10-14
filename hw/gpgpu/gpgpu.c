@@ -128,32 +128,50 @@ static const MemoryRegionOps gpgpu_ctrl_ops = {
     },
 };
 
-/* TODO: Implement VRAM read */
 static uint64_t gpgpu_vram_read(void *opaque, hwaddr addr, unsigned size)
 {
-    (void)opaque;
-    (void)addr;
-    (void)size;
-    return 0;
+    GPGPUState *s = opaque;
+    uint64_t value = 0;
+
+    if (addr > s->vram_size || size > s->vram_size - addr) {
+        s->error_status |= GPGPU_ERR_VRAM_FAULT;
+        s->global_status |= GPGPU_STATUS_ERROR;
+        return 0;
+    }
+    for (unsigned i = 0; i < size; i++) {
+        value |= (uint64_t)s->vram_ptr[addr + i] << (i * 8);
+    }
+    return value;
 }
 
-/* TODO: Implement VRAM write */
 static void gpgpu_vram_write(void *opaque, hwaddr addr, uint64_t val,
                              unsigned size)
 {
-    (void)opaque;
-    (void)addr;
-    (void)val;
-    (void)size;
+    GPGPUState *s = opaque;
+
+    if (addr > s->vram_size || size > s->vram_size - addr) {
+        s->error_status |= GPGPU_ERR_VRAM_FAULT;
+        s->global_status |= GPGPU_STATUS_ERROR;
+        return;
+    }
+    for (unsigned i = 0; i < size; i++) {
+        s->vram_ptr[addr + i] = val >> (i * 8);
+    }
 }
 
 static const MemoryRegionOps gpgpu_vram_ops = {
     .read = gpgpu_vram_read,
     .write = gpgpu_vram_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 8,
+        .unaligned = true,
+    },
     .impl = {
         .min_access_size = 1,
         .max_access_size = 8,
+        .unaligned = true,
     },
 };
 

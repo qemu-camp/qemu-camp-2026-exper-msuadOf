@@ -46,6 +46,20 @@ static uint64_t gpgpu_ctrl_read(void *opaque, hwaddr addr, unsigned size)
         return s->global_status;
     case GPGPU_REG_ERROR_STATUS:
         return s->error_status;
+    case GPGPU_REG_KERNEL_ADDR_LO:
+        return (uint32_t)s->kernel.kernel_addr;
+    case GPGPU_REG_KERNEL_ADDR_HI:
+        return s->kernel.kernel_addr >> 32;
+    case GPGPU_REG_KERNEL_ARGS_LO:
+        return (uint32_t)s->kernel.kernel_args;
+    case GPGPU_REG_KERNEL_ARGS_HI:
+        return s->kernel.kernel_args >> 32;
+    case GPGPU_REG_GRID_DIM_X ... GPGPU_REG_GRID_DIM_Z:
+        return s->kernel.grid_dim[(addr - GPGPU_REG_GRID_DIM_X) / 4];
+    case GPGPU_REG_BLOCK_DIM_X ... GPGPU_REG_BLOCK_DIM_Z:
+        return s->kernel.block_dim[(addr - GPGPU_REG_BLOCK_DIM_X) / 4];
+    case GPGPU_REG_SHARED_MEM_SIZE:
+        return s->kernel.shared_mem_size;
     default:
         return 0;
     }
@@ -69,6 +83,31 @@ static void gpgpu_ctrl_write(void *opaque, hwaddr addr, uint64_t val,
         if (!s->error_status) {
             s->global_status &= ~GPGPU_STATUS_ERROR;
         }
+        break;
+    case GPGPU_REG_KERNEL_ADDR_LO:
+        s->kernel.kernel_addr = (s->kernel.kernel_addr & ~UINT64_C(0xffffffff)) |
+                                (uint32_t)val;
+        break;
+    case GPGPU_REG_KERNEL_ADDR_HI:
+        s->kernel.kernel_addr = (s->kernel.kernel_addr & UINT32_MAX) |
+                                (val << 32);
+        break;
+    case GPGPU_REG_KERNEL_ARGS_LO:
+        s->kernel.kernel_args = (s->kernel.kernel_args & ~UINT64_C(0xffffffff)) |
+                                (uint32_t)val;
+        break;
+    case GPGPU_REG_KERNEL_ARGS_HI:
+        s->kernel.kernel_args = (s->kernel.kernel_args & UINT32_MAX) |
+                                (val << 32);
+        break;
+    case GPGPU_REG_GRID_DIM_X ... GPGPU_REG_GRID_DIM_Z:
+        s->kernel.grid_dim[(addr - GPGPU_REG_GRID_DIM_X) / 4] = val;
+        break;
+    case GPGPU_REG_BLOCK_DIM_X ... GPGPU_REG_BLOCK_DIM_Z:
+        s->kernel.block_dim[(addr - GPGPU_REG_BLOCK_DIM_X) / 4] = val;
+        break;
+    case GPGPU_REG_SHARED_MEM_SIZE:
+        s->kernel.shared_mem_size = val;
         break;
     default:
         break;

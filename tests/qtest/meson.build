@@ -331,7 +331,7 @@ if config_all_devices.has_key('CONFIG_VIRTIO_SERIAL')
   qos_test_ss.add(files('virtio-serial-test.c'))
 endif
 if config_all_devices.has_key('CONFIG_GPGPU')
-  qos_test_ss.add(files('gpgpu-test.c'))
+  qos_test_ss.add(files('gpgpu-test.c', 'gpgpu-extra-test.c'))
 endif
 if config_all_devices.has_key('CONFIG_IP_OCTAL_232')
   qos_test_ss.add(files('ipoctal232-test.c'))

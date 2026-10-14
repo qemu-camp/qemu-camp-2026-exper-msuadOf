@@ -280,4 +280,6 @@ struct GPGPUState {
     GPGPUSIMTContext simt;          /* 当前线程的执行上下文 */
 };
 
+void gpgpu_set_error(GPGPUState *s, uint32_t error);
+
 #endif /* HW_GPGPU_H */

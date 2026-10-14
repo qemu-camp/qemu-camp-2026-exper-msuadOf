@@ -295,6 +295,73 @@ static void test_kernel_faults(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmphex(qpci_io_readl(pdev, ctrl, ERROR) & 4, ==, 4);
 }
 
+static uint32_t rv_fp(unsigned funct7, unsigned rd, unsigned rm,
+                      unsigned rs1, unsigned rs2)
+{
+    return funct7 << 25 | rs2 << 20 | rs1 << 15 |
+           rm << 12 | rd << 7 | 0x53;
+}
+
+static void test_fp_rounding_flags(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QPCIDevice *pdev = extra_pci_device(obj);
+    QPCIBar ctrl = qpci_iomap(pdev, 0, NULL);
+    QPCIBar vram = qpci_iomap(pdev, 2, NULL);
+    const uint32_t one[3] = {1, 1, 1};
+    const uint32_t inputs[] = {0x40200000, 0, 0x80000000, 0xc0000000};
+    const uint32_t expected[] = {
+        2, 1, 3, 9, 0x7f800000, 0x80000000, 0,
+        0x40c80000, 0x7fc00000, 128, 16,
+    };
+    const uint32_t code[] = {
+        0x00001e37, /* output = 0x1000 */
+        0x00002eb7, /* input = 0x2000 */
+        rv_i(0x07, 1, 2, 29, 0), /* f1=2.5 */
+        rv_i(0x73, 0, 5, 2, 2), /* frm=RDN */
+        rv_fp(0x60, 5, 7, 1, 0), /* fcvt.w.s dynamic -> 2 */
+        0x005e2023,
+        rv_i(0x73, 6, 2, 0, 1), /* read NX */
+        0x006e2223,
+        rv_i(0x73, 0, 5, 0, 1), /* clear fflags */
+        rv_fp(0x60, 7, 3, 1, 0), /* fcvt.w.s RUP -> 3 */
+        0x007e2423,
+        rv_i(0x07, 2, 2, 29, 4), /* f2=+0 */
+        rv_fp(0x0c, 3, 0, 1, 2), /* 2.5/0 -> +Inf, DZ */
+        rv_i(0x73, 9, 2, 0, 1),
+        0x009e2623,
+        0x003e2827, /* fsw f3,16(x28) */
+        rv_i(0x07, 4, 2, 29, 8), /* f4=-0 */
+        rv_fp(0x14, 5, 0, 2, 4), /* min(+0,-0) */
+        0x005e2a27,
+        rv_fp(0x14, 5, 1, 2, 4), /* max(+0,-0) */
+        0x005e2c27,
+        0x10108343, /* fmadd.s f6,f1,f1,f2 -> 6.25 */
+        0x006e2e27,
+        rv_i(0x73, 0, 5, 0, 1),
+        rv_i(0x07, 7, 2, 29, 12), /* f7=-2 */
+        rv_fp(0x2c, 8, 0, 7, 0), /* sqrt(-2) -> canonical NaN */
+        0x028e2027,
+        rv_fp(0x70, 10, 1, 3, 0), /* classify +Inf */
+        0x02ae2223,
+        rv_i(0x73, 11, 2, 0, 1), /* NV */
+        0x02be2423,
+        0x00100073,
+    };
+
+    for (unsigned i = 0; i < G_N_ELEMENTS(inputs); i++) {
+        qpci_io_writel(pdev, vram, 0x2000 + i * 4, inputs[i]);
+    }
+    extra_upload(pdev, vram, code, G_N_ELEMENTS(code));
+    extra_dimensions(pdev, ctrl, one, one);
+    qpci_io_writel(pdev, ctrl, DISPATCH, 1);
+    g_assert_cmphex(qpci_io_readl(pdev, ctrl, ERROR), ==, 0);
+    for (unsigned i = 0; i < G_N_ELEMENTS(expected); i++) {
+        g_assert_cmphex(qpci_io_readl(pdev, vram, 0x1000 + i * 4), ==,
+                        expected[i]);
+    }
+}
+
 static void gpgpu_register_extra_tests(void)
 {
     qos_add_test("extra-vram-widths-reset", "gpgpu", test_vram_widths_reset,
@@ -305,6 +372,8 @@ static void gpgpu_register_extra_tests(void)
     qos_add_test("extra-kernel-control-flow", "gpgpu",
                  test_kernel_control_flow, NULL);
     qos_add_test("extra-kernel-faults", "gpgpu", test_kernel_faults, NULL);
+    qos_add_test("extra-fp-rounding-flags", "gpgpu",
+                 test_fp_rounding_flags, NULL);
 }
 
 libqos_init(gpgpu_register_extra_tests);

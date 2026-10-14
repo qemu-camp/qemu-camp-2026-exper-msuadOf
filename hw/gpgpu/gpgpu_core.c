@@ -32,6 +32,7 @@ void gpgpu_core_init_warp(GPGPUWarp *warp, uint32_t pc,
         warp->active_mask |= 1u << i;
         set_float_rounding_mode(float_round_nearest_even, &lane->fp_status);
         set_default_nan_mode(true, &lane->fp_status);
+        set_float_default_nan_pattern(0x40, &lane->fp_status);
     }
 }
 
@@ -152,6 +153,168 @@ static bool core_csr(GPGPULane *lane, uint32_t insn, uint32_t *value)
         lane->fcsr = (lane->fcsr & ~(mask << shift)) |
                      ((next & mask) << shift);
     }
+    return true;
+}
+
+static bool core_rounding_mode(GPGPULane *lane, unsigned rm)
+{
+    static const FloatRoundMode modes[] = {
+        float_round_nearest_even, float_round_to_zero,
+        float_round_down, float_round_up, float_round_ties_away,
+    };
+
+    if (rm == 7) {
+        rm = (lane->fcsr >> 5) & 7;
+    }
+    if (rm >= G_N_ELEMENTS(modes)) {
+        return false;
+    }
+    set_float_rounding_mode(modes[rm], &lane->fp_status);
+    return true;
+}
+
+static void core_fp_flags(GPGPULane *lane)
+{
+    unsigned flags = get_float_exception_flags(&lane->fp_status);
+
+    lane->fcsr |= ((flags & float_flag_inexact) ? 1 : 0) |
+                  ((flags & float_flag_underflow) ? 2 : 0) |
+                  ((flags & float_flag_overflow) ? 4 : 0) |
+                  ((flags & float_flag_divbyzero) ? 8 : 0) |
+                  ((flags & float_flag_invalid) ? 16 : 0);
+}
+
+static uint32_t core_fclass(uint32_t value)
+{
+    unsigned exponent = (value >> 23) & 255;
+    unsigned fraction = value & 0x7fffff;
+    bool negative = value >> 31;
+
+    if (exponent == 255) {
+        if (fraction) {
+            return (fraction & 0x400000) ? 1u << 9 : 1u << 8;
+        }
+        return negative ? 1u : 1u << 7;
+    }
+    if (!exponent) {
+        if (!fraction) {
+            return negative ? 1u << 3 : 1u << 4;
+        }
+        return negative ? 1u << 2 : 1u << 5;
+    }
+    return negative ? 1u << 1 : 1u << 6;
+}
+
+static bool core_exec_fp(GPGPULane *lane, uint32_t insn, uint32_t *result,
+                          bool *write_gpr)
+{
+    unsigned rd = (insn >> 7) & 31;
+    unsigned rm = (insn >> 12) & 7;
+    unsigned rs1 = (insn >> 15) & 31;
+    unsigned rs2 = (insn >> 20) & 31;
+    unsigned funct7 = insn >> 25;
+    uint32_t a = lane->fpr[rs1], b = lane->fpr[rs2];
+    float_status *fp = &lane->fp_status;
+
+    *write_gpr = false;
+    set_float_exception_flags(0, fp);
+    switch (funct7) {
+    case 0x00: /* FADD.S */
+    case 0x04: /* FSUB.S */
+    case 0x08: /* FMUL.S */
+    case 0x0c: /* FDIV.S */
+    case 0x2c: /* FSQRT.S */
+    case 0x60: /* FCVT.W[U].S */
+    case 0x68: /* FCVT.S.W[U] */
+        if (!core_rounding_mode(lane, rm)) {
+            return false;
+        }
+        break;
+    default:
+        break;
+    }
+
+    switch (funct7) {
+    case 0x00:
+        *result = float32_add(a, b, fp);
+        break;
+    case 0x04:
+        *result = float32_sub(a, b, fp);
+        break;
+    case 0x08:
+        *result = float32_mul(a, b, fp);
+        break;
+    case 0x0c:
+        *result = float32_div(a, b, fp);
+        break;
+    case 0x2c:
+        if (rs2) {
+            return false;
+        }
+        *result = float32_sqrt(a, fp);
+        break;
+    case 0x10: /* FSGNJ.S/FSGNJN.S/FSGNJX.S */
+        if (rm > 2) {
+            return false;
+        }
+        *result = (a & 0x7fffffff) |
+                  ((rm == 0 ? b : rm == 1 ? ~b : a ^ b) & 0x80000000);
+        break;
+    case 0x14: /* FMIN.S/FMAX.S */
+        if (rm > 1) {
+            return false;
+        }
+        *result = rm ? float32_maxnum(a, b, fp) : float32_minnum(a, b, fp);
+        break;
+    case 0x50: { /* FLE.S/FLT.S/FEQ.S */
+        FloatRelation relation;
+
+        if (rm > 2) {
+            return false;
+        }
+        relation = rm == 2 ? float32_compare_quiet(a, b, fp) :
+                             float32_compare(a, b, fp);
+        *result = rm == 2 ? relation == float_relation_equal :
+                  rm == 1 ? relation == float_relation_less :
+                  relation == float_relation_less ||
+                  relation == float_relation_equal;
+        *write_gpr = true;
+        break;
+    }
+    case 0x60:
+        if (rs2 > 1) {
+            return false;
+        }
+        *result = rs2 ? float32_to_uint32(a, fp) : float32_to_int32(a, fp);
+        *write_gpr = true;
+        break;
+    case 0x68:
+        if (rs2 > 1) {
+            return false;
+        }
+        *result = rs2 ? uint32_to_float32(lane->gpr[rs1], fp) :
+                        int32_to_float32(lane->gpr[rs1], fp);
+        break;
+    case 0x70: /* FMV.X.W/FCLASS.S */
+        if (rs2 || rm > 1) {
+            return false;
+        }
+        *result = rm ? core_fclass(a) : a;
+        *write_gpr = true;
+        break;
+    case 0x78: /* FMV.W.X */
+        if (rs2 || rm) {
+            return false;
+        }
+        *result = lane->gpr[rs1];
+        break;
+    default:
+        return false;
+    }
+    if (!*write_gpr) {
+        lane->fpr[rd] = *result;
+    }
+    core_fp_flags(lane);
     return true;
 }
 
@@ -340,6 +503,49 @@ static bool core_exec_inst(GPGPUState *s, GPGPULane *lane, uint32_t insn)
             return false;
         }
         break;
+    case 0x07: /* FLW */
+        if (funct3 != 2 || !core_load(s, a + imm, 4, &result)) {
+            return false;
+        }
+        lane->fpr[rd] = result;
+        write_rd = false;
+        break;
+    case 0x27: /* FSW */
+        imm = (int32_t)((insn & 0xfe000000) |
+                        ((insn >> 7) & 31) << 20) >> 20;
+        if (funct3 != 2 || !core_store(s, a + imm, 4, lane->fpr[rs2])) {
+            return false;
+        }
+        write_rd = false;
+        break;
+    case 0x53:
+        if (!core_exec_fp(lane, insn, &result, &write_rd)) {
+            return false;
+        }
+        break;
+    case 0x43: /* FMADD.S */
+    case 0x47: /* FMSUB.S */
+    case 0x4b: /* FNMSUB.S */
+    case 0x4f: { /* FNMADD.S */
+        unsigned rs3 = insn >> 27;
+        int flags = 0;
+
+        if (((insn >> 25) & 3) || !core_rounding_mode(lane, funct3)) {
+            return false;
+        }
+        if (opcode == 0x47 || opcode == 0x4f) {
+            flags |= float_muladd_negate_c;
+        }
+        if (opcode == 0x4b || opcode == 0x4f) {
+            flags |= float_muladd_negate_product;
+        }
+        set_float_exception_flags(0, &lane->fp_status);
+        lane->fpr[rd] = float32_muladd(lane->fpr[rs1], lane->fpr[rs2],
+                                      lane->fpr[rs3], flags, &lane->fp_status);
+        core_fp_flags(lane);
+        write_rd = false;
+        break;
+    }
     default:
         return false;
     }

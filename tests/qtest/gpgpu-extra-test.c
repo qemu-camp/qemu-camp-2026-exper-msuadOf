@@ -362,6 +362,67 @@ static void test_fp_rounding_flags(void *obj, void *data,
     }
 }
 
+static void test_lp_rounding_edges(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QPCIDevice *pdev = extra_pci_device(obj);
+    QPCIBar ctrl = qpci_iomap(pdev, 0, NULL);
+    QPCIBar vram = qpci_iomap(pdev, 2, NULL);
+    const uint32_t one[3] = {1, 1, 1};
+    const struct {
+        uint32_t input;
+        unsigned funct7, rs2, rm;
+        uint32_t expected;
+    } cases[] = {
+        {0,          0x26, 1, 0, 0},
+        {0x80000000, 0x26, 1, 0, 8},
+        {0x00000001, 0x26, 1, 0, 0},
+        {0x3e800000, 0x26, 1, 0, 0}, /* .25 ties to even */
+        {0x3f400000, 0x26, 1, 0, 2}, /* .75 */
+        {0x3fa00000, 0x26, 1, 0, 2}, /* 1.25 */
+        {0x3fe00000, 0x26, 1, 0, 4}, /* 1.75 */
+        {0x40200000, 0x26, 1, 0, 4}, /* 2.5 */
+        {0x40600000, 0x26, 1, 0, 6}, /* 3.5 */
+        {0x40a00000, 0x26, 1, 0, 6}, /* 5 */
+        {0xbfa00000, 0x26, 1, 0, 10}, /* -1.25 */
+        {0xbfa00000, 0x26, 1, 2, 11}, /* RDN -> -1.5 */
+        {0x3fa00000, 0x26, 1, 3, 3}, /* RUP -> 1.5 */
+        {0x7f800000, 0x26, 1, 0, 7},
+        {0xff800000, 0x26, 1, 0, 15},
+        {0x7fc00000, 0x26, 1, 0, 7},
+        {0xffc00000, 0x26, 1, 0, 15},
+        {0x7f800000, 0x24, 1, 0, 0x7e}, /* E4M3 Inf saturates */
+        {0xff800000, 0x24, 1, 0, 0xfe},
+        {0x7f800000, 0x24, 3, 0, 0x7c}, /* E5M2 preserves Inf */
+        {0xff800000, 0x24, 3, 0, 0xfc},
+        {0x47800000, 0x24, 3, 0, 0x7b}, /* E5M2 finite saturation */
+        {0x3f808000, 0x22, 1, 0, 0x3f80}, /* BF16 even midpoint */
+        {0x3f818000, 0x22, 1, 0, 0x3f82},
+    };
+    uint32_t code[2 + G_N_ELEMENTS(cases) * 4 + 1];
+    unsigned n = 0;
+
+    code[n++] = 0x00001e37;
+    code[n++] = 0x00002eb7;
+    for (unsigned i = 0; i < G_N_ELEMENTS(cases); i++) {
+        qpci_io_writel(pdev, vram, 0x2000 + i * 4, cases[i].input);
+        code[n++] = rv_i(0x07, 1, 2, 29, i * 4);
+        code[n++] = rv_fp(cases[i].funct7, 2, cases[i].rm, 1, cases[i].rs2);
+        code[n++] = rv_fp(0x70, 5, 0, 2, 0);
+        code[n++] = ((i * 4 >> 5) << 25) | (5 << 20) | (28 << 15) |
+                    (2 << 12) | ((i * 4 & 31) << 7) | 0x23;
+    }
+    code[n++] = 0x00100073;
+    extra_upload(pdev, vram, code, n);
+    extra_dimensions(pdev, ctrl, one, one);
+    qpci_io_writel(pdev, ctrl, DISPATCH, 1);
+    g_assert_cmphex(qpci_io_readl(pdev, ctrl, ERROR), ==, 0);
+    for (unsigned i = 0; i < G_N_ELEMENTS(cases); i++) {
+        g_assert_cmphex(qpci_io_readl(pdev, vram, 0x1000 + i * 4), ==,
+                        cases[i].expected);
+    }
+}
+
 static void gpgpu_register_extra_tests(void)
 {
     qos_add_test("extra-vram-widths-reset", "gpgpu", test_vram_widths_reset,
@@ -374,6 +435,8 @@ static void gpgpu_register_extra_tests(void)
     qos_add_test("extra-kernel-faults", "gpgpu", test_kernel_faults, NULL);
     qos_add_test("extra-fp-rounding-flags", "gpgpu",
                  test_fp_rounding_flags, NULL);
+    qos_add_test("extra-lp-rounding-edges", "gpgpu",
+                 test_lp_rounding_edges, NULL);
 }
 
 libqos_init(gpgpu_register_extra_tests);

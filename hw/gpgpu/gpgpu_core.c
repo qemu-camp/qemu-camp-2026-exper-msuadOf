@@ -205,6 +205,58 @@ static uint32_t core_fclass(uint32_t value)
     return negative ? 1u << 1 : 1u << 6;
 }
 
+static float4_e2m1 core_float32_to_e2m1(uint32_t value, float_status *fp)
+{
+    static const uint32_t values[] = {
+        0, 0x3f000000, 0x3f800000, 0x3fc00000,
+        0x40000000, 0x40400000, 0x40800000, 0x40c00000,
+    };
+    static const uint32_t midpoints[] = {
+        0x3e800000, 0x3f400000, 0x3fa00000, 0x3fe00000,
+        0x40200000, 0x40600000, 0x40a00000,
+    };
+    uint32_t magnitude = value & 0x7fffffff;
+    unsigned sign = value >> 31;
+    unsigned lower = 0, result;
+    FloatRoundMode rm = get_float_rounding_mode(fp);
+
+    /* Positive FP32 bit patterns sort numerically, including subnormals. */
+    if (magnitude >= values[7]) {
+        if (magnitude > values[7]) {
+            float_raise(magnitude > 0x7f800000 ? float_flag_invalid :
+                        float_flag_inexact, fp);
+        }
+        return (sign << 3) | 7;
+    }
+    while (magnitude > values[lower + 1]) {
+        lower++;
+    }
+    if (magnitude == values[lower]) {
+        return (sign << 3) | lower;
+    }
+    if (magnitude == values[lower + 1]) {
+        return (sign << 3) | (lower + 1);
+    }
+    float_raise(float_flag_inexact, fp);
+    switch (rm) {
+    case float_round_to_zero:
+        result = lower;
+        break;
+    case float_round_down:
+        result = lower + sign;
+        break;
+    case float_round_up:
+        result = lower + !sign;
+        break;
+    default:
+        result = lower + (magnitude > midpoints[lower] ||
+                 (magnitude == midpoints[lower] &&
+                  (rm == float_round_ties_away || (lower & 1))));
+        break;
+    }
+    return (sign << 3) | result;
+}
+
 static bool core_exec_fp(GPGPULane *lane, uint32_t insn, uint32_t *result,
                           bool *write_gpr)
 {
@@ -226,6 +278,9 @@ static bool core_exec_fp(GPGPULane *lane, uint32_t insn, uint32_t *result,
     case 0x2c: /* FSQRT.S */
     case 0x60: /* FCVT.W[U].S */
     case 0x68: /* FCVT.S.W[U] */
+    case 0x22: /* BF16 conversion extension */
+    case 0x24: /* FP8 conversion extension */
+    case 0x26: /* FP4 conversion extension */
         if (!core_rounding_mode(lane, rm)) {
             return false;
         }
@@ -307,6 +362,41 @@ static bool core_exec_fp(GPGPULane *lane, uint32_t insn, uint32_t *result,
             return false;
         }
         *result = lane->gpr[rs1];
+        break;
+    case 0x22:
+        if (rs2 > 1) {
+            return false;
+        }
+        *result = rs2 ? float32_to_bfloat16(a, fp) :
+                        bfloat16_to_float32(a & 0xffff, fp);
+        break;
+    case 0x24:
+        switch (rs2) {
+        case 0:
+            *result = bfloat16_to_float32(
+                float8_e4m3_to_bfloat16(a & 0xff, fp), fp);
+            break;
+        case 1:
+            *result = float32_to_float8_e4m3(a, true, fp);
+            break;
+        case 2:
+            *result = bfloat16_to_float32(
+                float8_e5m2_to_bfloat16(a & 0xff, fp), fp);
+            break;
+        case 3:
+            *result = float32_to_float8_e5m2(a, !float32_is_infinity(a), fp);
+            break;
+        default:
+            return false;
+        }
+        break;
+    case 0x26:
+        if (rs2 > 1) {
+            return false;
+        }
+        *result = rs2 ? core_float32_to_e2m1(a, fp) :
+            bfloat16_to_float32(float8_e4m3_to_bfloat16(
+                float4_e2m1_to_float8_e4m3(a & 15, fp), fp), fp);
         break;
     default:
         return false;

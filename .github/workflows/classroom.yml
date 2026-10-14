@@ -222,25 +222,74 @@ jobs:
           echo "score=$score"   >> "$GITHUB_OUTPUT"
           echo "total=100"      >> "$GITHUB_OUTPUT"
           echo "::notice::GPGPU experiment: $passed/$TOTAL_CASES cases passed, score $score/100"
+          jq -n --arg commit "$GITHUB_SHA" \
+            --argjson passed "$passed" --argjson totalCases "$TOTAL_CASES" \
+            --argjson score "$score" \
+            '{commit: $commit, passed: $passed, totalCases: $totalCases,
+              score: $score, totalScore: 100}' > build/gpgpu-ci-score.json
+          {
+            echo "### GPGPU score"
+            echo ""
+            echo "Tests: $passed/$TOTAL_CASES; score: $score/100"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Preserve GPGPU score
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpgpu-score
+          path: |
+            build/gpgpu-result.log
+            build/gpgpu-ci-score.json
+          if-no-files-found: error
 
       - name: Upload score
         if: ${{ steps.score.outputs.score != '0' }}
+        env:
+          COURSE_ID: ${{ secrets.QEMU_CAMP_2026_GPU_AUTUMN_COURSE_ID }}
+          COURSE_TOKEN: ${{ secrets.QEMU_CAMP_2026_GPU_AUTUMN_TOKEN }}
+          COURSE_POST_API: ${{ secrets.QEMU_CAMP_2026_COURSE_POST_API }}
+          SCORE: ${{ steps.score.outputs.score }}
+          TOTAL_SCORE: ${{ steps.score.outputs.total }}
         run: |
-          summary=$(jq -n \
+          missing=0
+          for key in COURSE_ID COURSE_TOKEN COURSE_POST_API; do
+            if [ -z "${!key}" ]; then
+              echo "::error::GPGPU score upload requires $key. Configure the QEMU_CAMP_2026_GPU_AUTUMN_COURSE_ID, QEMU_CAMP_2026_GPU_AUTUMN_TOKEN and QEMU_CAMP_2026_COURSE_POST_API Actions secrets."
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Course upload failed: missing Actions secrets. The computed score is available in the gpgpu-score artifact." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          if ! [[ "$COURSE_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::GPGPU COURSE_ID must be a positive integer."
+            exit 1
+          fi
+          jq -n \
             --arg channel "github" \
-            --argjson courseId "${{ secrets.QEMU_CAMP_2026_GPU_AUTUMN_COURSE_ID }}" \
+            --argjson courseId "$COURSE_ID" \
             --arg ext "{}" \
-            --arg name "${{ github.actor }}" \
-            --argjson score "${{ steps.score.outputs.score }}" \
-            --argjson totalScore "${{ steps.score.outputs.total }}" \
-            '{channel: $channel, courseId: $courseId, ext: $ext, name: $name, score: $score, totalScore: $totalScore}')
-          echo "$summary"
-          curl -X POST "${{ secrets.QEMU_CAMP_2026_COURSE_POST_API }}" \
+            --arg name "$GITHUB_ACTOR" \
+            --argjson score "$SCORE" \
+            --argjson totalScore "$TOTAL_SCORE" \
+            '{channel: $channel, courseId: $courseId, ext: $ext, name: $name, score: $score, totalScore: $totalScore}' \
+            > build/gpgpu-score-upload.json
+          status=$(curl --fail-with-body --silent --show-error \
+            --connect-timeout 30 --max-time 120 \
+            -X POST "$COURSE_POST_API" \
             -H "accept: application/json;charset=utf-8" \
             -H "Content-Type: application/json" \
-            -H "token: ${{ secrets.QEMU_CAMP_2026_GPU_AUTUMN_TOKEN }}" \
-            -d "$summary" \
-            -v
+            -H "token: $COURSE_TOKEN" \
+            --data-binary @build/gpgpu-score-upload.json \
+            --output build/gpgpu-score-upload-response.json \
+            --write-out '%{http_code}')
+          if ! [[ "$status" =~ ^2[0-9][0-9]$ ]]; then
+            echo "::error::GPGPU score upload returned HTTP $status."
+            exit 1
+          fi
+          echo "Course upload returned HTTP $status." >> "$GITHUB_STEP_SUMMARY"
+          cat build/gpgpu-score-upload-response.json
 
   # ────────────────────────────────────────────────────────────
   # Rust experiment — 3 unit tests + 7 QTest = 10 × 10 pts

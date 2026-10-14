@@ -117,6 +117,16 @@ static void gpgpu_dispatch_kernel(GPGPUState *s)
         threads *= s->kernel.block_dim[i];
         blocks *= s->kernel.grid_dim[i];
     }
+    if (s->kernel.kernel_args >= s->vram_size ||
+        (s->kernel.stack_stride &&
+         ((s->kernel.stack_addr & 15) ||
+          (s->kernel.stack_stride & 15) ||
+          s->kernel.stack_addr >= s->vram_size ||
+          threads * blocks > (s->vram_size - s->kernel.stack_addr) /
+                             s->kernel.stack_stride))) {
+        gpgpu_set_error(s, GPGPU_ERR_INVALID_CMD);
+        return;
+    }
 
     s->global_status &= ~GPGPU_STATUS_READY;
     s->global_status |= GPGPU_STATUS_BUSY;
@@ -169,6 +179,10 @@ static uint64_t gpgpu_ctrl_read(void *opaque, hwaddr addr, unsigned size)
         return s->kernel.block_dim[(addr - GPGPU_REG_BLOCK_DIM_X) / 4];
     case GPGPU_REG_SHARED_MEM_SIZE:
         return s->kernel.shared_mem_size;
+    case GPGPU_REG_STACK_ADDR:
+        return s->kernel.stack_addr;
+    case GPGPU_REG_STACK_STRIDE:
+        return s->kernel.stack_stride;
     case GPGPU_REG_DMA_SRC_LO:
         return (uint32_t)s->dma.src_addr;
     case GPGPU_REG_DMA_SRC_HI:
@@ -258,6 +272,12 @@ static void gpgpu_ctrl_write(void *opaque, hwaddr addr, uint64_t val,
         break;
     case GPGPU_REG_SHARED_MEM_SIZE:
         s->kernel.shared_mem_size = val;
+        break;
+    case GPGPU_REG_STACK_ADDR:
+        s->kernel.stack_addr = val;
+        break;
+    case GPGPU_REG_STACK_STRIDE:
+        s->kernel.stack_stride = val;
         break;
     case GPGPU_REG_DISPATCH:
         gpgpu_dispatch_kernel(s);

@@ -715,6 +715,16 @@ int gpgpu_core_exec_kernel(GPGPUState *s)
                                          block,
                                          MIN(threads - base, GPGPU_WARP_SIZE),
                                          base / GPGPU_WARP_SIZE, linear_block);
+                    for (unsigned lane = 0; lane < GPGPU_WARP_SIZE; lane++) {
+                        warp->lanes[lane].gpr[10] = s->kernel.kernel_args;
+                        if (s->kernel.stack_stride) {
+                            uint64_t thread = linear_block * threads +
+                                              base + lane + 1;
+
+                            warp->lanes[lane].gpr[2] = s->kernel.stack_addr +
+                                thread * s->kernel.stack_stride;
+                        }
+                    }
                     if (gpgpu_core_exec_warp(s, warp, GPGPU_MAX_CYCLES)) {
                         return -1;
                     }

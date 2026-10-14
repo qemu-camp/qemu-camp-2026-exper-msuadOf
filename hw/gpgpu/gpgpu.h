@@ -97,6 +97,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(GPGPUState, GPGPU)
 #define GPGPU_REG_BLOCK_DIM_Z       0x0324  /* Block Z 维度 */
 #define GPGPU_REG_SHARED_MEM_SIZE   0x0328  /* 每个 Block 的共享内存大小 */
 #define GPGPU_REG_DISPATCH          0x0330  /* 写任意值启动内核执行 */
+#define GPGPU_REG_STACK_ADDR        0x0334  /* SDK: per-thread stack arena */
+#define GPGPU_REG_STACK_STRIDE      0x0338  /* SDK: bytes per thread */
 
 /* DMA 引擎寄存器组 (0x0400 - 0x04FF): 主机与显存之间的数据传输 */
 #define GPGPU_REG_DMA_SRC_LO        0x0400  /* DMA 源地址低 32 位 */
@@ -188,6 +190,8 @@ typedef struct GPGPUKernelParams {
     uint32_t grid_dim[3];       /* Grid 维度 [X, Y, Z] */
     uint32_t block_dim[3];      /* Block 维度 [X, Y, Z] */
     uint32_t shared_mem_size;   /* 每个 Block 的共享内存大小 */
+    uint32_t stack_addr;
+    uint32_t stack_stride;
 } GPGPUKernelParams;
 
 /*

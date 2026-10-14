@@ -22,6 +22,8 @@
 #include "gpgpu.h"
 #include "gpgpu_core.h"
 
+static void gpgpu_reset(DeviceState *dev);
+
 static uint64_t gpgpu_ctrl_read(void *opaque, hwaddr addr, unsigned size)
 {
     GPGPUState *s = opaque;
@@ -38,19 +40,39 @@ static uint64_t gpgpu_ctrl_read(void *opaque, hwaddr addr, unsigned size)
         return (uint32_t)s->vram_size;
     case GPGPU_REG_VRAM_SIZE_HI:
         return s->vram_size >> 32;
+    case GPGPU_REG_GLOBAL_CTRL:
+        return s->global_ctrl;
+    case GPGPU_REG_GLOBAL_STATUS:
+        return s->global_status;
+    case GPGPU_REG_ERROR_STATUS:
+        return s->error_status;
     default:
         return 0;
     }
 }
 
-/* TODO: Implement MMIO control register write */
 static void gpgpu_ctrl_write(void *opaque, hwaddr addr, uint64_t val,
                              unsigned size)
 {
-    (void)opaque;
-    (void)addr;
-    (void)val;
-    (void)size;
+    GPGPUState *s = opaque;
+
+    switch (addr) {
+    case GPGPU_REG_GLOBAL_CTRL:
+        if (val & GPGPU_CTRL_RESET) {
+            gpgpu_reset(DEVICE(s));
+        } else {
+            s->global_ctrl = val & GPGPU_CTRL_ENABLE;
+        }
+        break;
+    case GPGPU_REG_ERROR_STATUS:
+        s->error_status &= ~val;
+        if (!s->error_status) {
+            s->global_status &= ~GPGPU_STATUS_ERROR;
+        }
+        break;
+    default:
+        break;
+    }
 }
 
 static const MemoryRegionOps gpgpu_ctrl_ops = {
@@ -221,9 +243,6 @@ static void gpgpu_reset(DeviceState *dev)
     memset(&s->simt, 0, sizeof(s->simt));
     timer_del(s->dma_timer);
     timer_del(s->kernel_timer);
-    if (s->vram_ptr) {
-        memset(s->vram_ptr, 0, s->vram_size);
-    }
 }
 
 static const Property gpgpu_properties[] = {

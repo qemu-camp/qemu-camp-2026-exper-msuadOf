@@ -149,6 +149,16 @@ static uint64_t gpgpu_ctrl_read(void *opaque, hwaddr addr, unsigned size)
         return s->dma.ctrl;
     case GPGPU_REG_DMA_STATUS:
         return s->dma.status;
+    case GPGPU_REG_THREAD_ID_X ... GPGPU_REG_THREAD_ID_Z:
+        return s->simt.thread_id[(addr - GPGPU_REG_THREAD_ID_X) / 4];
+    case GPGPU_REG_BLOCK_ID_X ... GPGPU_REG_BLOCK_ID_Z:
+        return s->simt.block_id[(addr - GPGPU_REG_BLOCK_ID_X) / 4];
+    case GPGPU_REG_WARP_ID:
+        return s->simt.warp_id;
+    case GPGPU_REG_LANE_ID:
+        return s->simt.lane_id;
+    case GPGPU_REG_THREAD_MASK:
+        return s->simt.thread_mask;
     default:
         return 0;
     }
@@ -236,6 +246,30 @@ static void gpgpu_ctrl_write(void *opaque, hwaddr addr, uint64_t val,
         s->dma.ctrl = val & 7;
         if (val & GPGPU_DMA_START) {
             gpgpu_start_dma(s);
+        }
+        break;
+    case GPGPU_REG_THREAD_ID_X ... GPGPU_REG_THREAD_ID_Z:
+        s->simt.thread_id[(addr - GPGPU_REG_THREAD_ID_X) / 4] = val;
+        break;
+    case GPGPU_REG_BLOCK_ID_X ... GPGPU_REG_BLOCK_ID_Z:
+        s->simt.block_id[(addr - GPGPU_REG_BLOCK_ID_X) / 4] = val;
+        break;
+    case GPGPU_REG_WARP_ID:
+        s->simt.warp_id = val;
+        break;
+    case GPGPU_REG_LANE_ID:
+        s->simt.lane_id = val & (GPGPU_WARP_SIZE - 1);
+        break;
+    case GPGPU_REG_THREAD_MASK:
+        s->simt.thread_mask = val;
+        break;
+    case GPGPU_REG_BARRIER:
+        s->simt.barrier_active = true;
+        s->simt.barrier_count++;
+        if (s->simt.barrier_target &&
+            s->simt.barrier_count >= s->simt.barrier_target) {
+            s->simt.barrier_count = 0;
+            s->simt.barrier_active = false;
         }
         break;
     default:

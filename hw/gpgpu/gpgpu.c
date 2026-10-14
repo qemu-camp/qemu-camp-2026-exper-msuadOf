@@ -25,6 +25,31 @@
 static void gpgpu_reset(DeviceState *dev);
 static void gpgpu_kernel_complete(void *opaque);
 
+static void gpgpu_simx_step(void *opaque)
+{
+    GPGPUState *s = opaque;
+    int result = s->simx_api->step(s->simx, 256);
+    uint64_t completed = s->simx_api->completed(s->simx);
+
+    if (completed != s->simx_completions) {
+        s->simx_completions = completed;
+        gpgpu_kernel_complete(s);
+    }
+
+    if (result < 0) {
+        s->global_status &= ~GPGPU_STATUS_BUSY;
+        s->global_status |= GPGPU_STATUS_READY;
+        gpgpu_set_error(s, GPGPU_ERR_KERNEL_FAULT);
+    } else if (result) {
+        s->global_status &= ~GPGPU_STATUS_READY;
+        s->global_status |= GPGPU_STATUS_BUSY;
+        timer_mod(s->simx_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000);
+    } else {
+        s->global_status &= ~GPGPU_STATUS_BUSY;
+        s->global_status |= GPGPU_STATUS_READY;
+    }
+}
+
 static void gpgpu_update_irq(GPGPUState *s, uint32_t events)
 {
     PCIDevice *pdev = PCI_DEVICE(s);
@@ -130,6 +155,23 @@ static void gpgpu_dispatch_kernel(GPGPUState *s)
 
     s->global_status &= ~GPGPU_STATUS_READY;
     s->global_status |= GPGPU_STATUS_BUSY;
+    if (s->simx) {
+        GPGPUVortexLaunch launch = {
+            .pc = s->kernel.kernel_addr,
+            .args = s->kernel.kernel_args,
+            .shared_size = s->kernel.shared_mem_size,
+        };
+        memcpy(launch.grid, s->kernel.grid_dim, sizeof(launch.grid));
+        memcpy(launch.block, s->kernel.block_dim, sizeof(launch.block));
+        if (s->simx_api->launch(s->simx, &launch)) {
+            s->global_status &= ~GPGPU_STATUS_BUSY;
+            s->global_status |= GPGPU_STATUS_READY;
+            gpgpu_set_error(s, GPGPU_ERR_KERNEL_FAULT);
+        } else {
+            gpgpu_simx_step(s);
+        }
+        return;
+    }
     if (gpgpu_core_exec_kernel(s)) {
         s->global_status &= ~GPGPU_STATUS_BUSY;
         s->global_status |= GPGPU_STATUS_READY;
@@ -395,19 +437,34 @@ static const MemoryRegionOps gpgpu_vram_ops = {
 
 static uint64_t gpgpu_doorbell_read(void *opaque, hwaddr addr, unsigned size)
 {
-    (void)opaque;
-    (void)addr;
-    (void)size;
+    GPGPUState *s = opaque;
+    if (s->simx && addr >= 0x1000 && addr < 0x1200 && size == 4) {
+        gpgpu_simx_step(s);
+        return s->simx_api->cp_read(s->simx, addr - 0x1000);
+    }
+    if (s->simx && addr == 0x2000) {
+        return (uint32_t)s->simx_api->cycles(s->simx);
+    }
+    if (s->simx && addr == 0x2004) {
+        return (uint32_t)s->simx_api->mem_requests(s->simx);
+    }
+    if (s->simx && addr == 0x2008) {
+        return (uint32_t)s->simx_api->divergence(s->simx);
+    }
     return 0;
 }
 
 static void gpgpu_doorbell_write(void *opaque, hwaddr addr, uint64_t val,
                                  unsigned size)
 {
-    (void)opaque;
-    (void)addr;
-    (void)val;
-    (void)size;
+    GPGPUState *s = opaque;
+    if (s->simx && addr >= 0x1000 && addr < 0x1200 && size == 4) {
+        if (s->simx_api->cp_write(s->simx, addr - 0x1000, val)) {
+            gpgpu_set_error(s, GPGPU_ERR_INVALID_CMD);
+            return;
+        }
+        gpgpu_simx_step(s);
+    }
 }
 
 static const MemoryRegionOps gpgpu_doorbell_ops = {
@@ -467,6 +524,14 @@ static void gpgpu_realize(PCIDevice *pdev, Error **errp)
         return;
     }
 
+    if (!gpgpu_simx_init(s, errp)) {
+        g_free(s->vram_ptr);
+        return;
+    }
+    if (s->simx) {
+        s->simx_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, gpgpu_simx_step, s);
+    }
+
     /* BAR 0: control registers */
     memory_region_init_io(&s->ctrl_mmio, OBJECT(s), &gpgpu_ctrl_ops, s,
                           "gpgpu-ctrl", GPGPU_CTRL_BAR_SIZE);
@@ -495,11 +560,19 @@ static void gpgpu_realize(PCIDevice *pdev, Error **errp)
                   &s->ctrl_mmio, 0, 0xFE000,
                   &s->ctrl_mmio, 0, 0xFF000,
                   0, errp)) {
+        if (s->simx) {
+            timer_free(s->simx_timer);
+            gpgpu_simx_fini(s);
+        }
         g_free(s->vram_ptr);
         return;
     }
 
     if (msi_init(pdev, 0, 1, true, false, errp) < 0) {
+        if (s->simx) {
+            timer_free(s->simx_timer);
+            gpgpu_simx_fini(s);
+        }
         msix_uninit(pdev, &s->ctrl_mmio, &s->ctrl_mmio);
         g_free(s->vram_ptr);
         return;
@@ -521,6 +594,10 @@ static void gpgpu_exit(PCIDevice *pdev)
 
     timer_free(s->dma_timer);
     timer_free(s->kernel_timer);
+    if (s->simx) {
+        timer_free(s->simx_timer);
+        gpgpu_simx_fini(s);
+    }
     g_free(s->vram_ptr);
     msix_uninit(pdev, &s->ctrl_mmio, &s->ctrl_mmio);
     msi_uninit(pdev);
@@ -541,9 +618,18 @@ static void gpgpu_reset(DeviceState *dev)
     memset(&s->simt, 0, sizeof(s->simt));
     timer_del(s->dma_timer);
     timer_del(s->kernel_timer);
+    if (s->simx) {
+        timer_del(s->simx_timer);
+        if (s->simx_api->reset(s->simx)) {
+            gpgpu_set_error(s, GPGPU_ERR_KERNEL_FAULT);
+        }
+        s->simx_completions = 0;
+    }
 }
 
 static const Property gpgpu_properties[] = {
+    DEFINE_PROP_STRING("backend", GPGPUState, backend),
+    DEFINE_PROP_STRING("simx_library", GPGPUState, simx_library),
     DEFINE_PROP_UINT32("num_cus", GPGPUState, num_cus,
                        GPGPU_DEFAULT_NUM_CUS),
     DEFINE_PROP_UINT32("warps_per_cu", GPGPUState, warps_per_cu,

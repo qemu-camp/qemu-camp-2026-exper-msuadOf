@@ -13,6 +13,7 @@
 #include "hw/pci/pci_device.h"
 #include "hw/pci/pci_ids.h"
 #include "qom/object.h"
+#include "contrib/gpgpu/vortex/bridge.h"
 
 /*
  * ============================================================================
@@ -257,6 +258,13 @@ struct GPGPUState {
     uint32_t warps_per_cu;          /* 每个 CU 的 warp 数量 */
     uint32_t warp_size;             /* 每个 warp 的线程数 */
     uint64_t vram_size;             /* 显存大小 (字节) */
+    char *backend;
+    char *simx_library;
+    void *simx_module;
+    void *simx;
+    const GPGPUVortexAPI *simx_api;
+    uint64_t simx_completions;
+    QEMUTimer *simx_timer;
 
     /*-- 显存后端存储 --*/
     uint8_t *vram_ptr;              /* 显存数据指针 */
@@ -285,5 +293,7 @@ struct GPGPUState {
 };
 
 void gpgpu_set_error(GPGPUState *s, uint32_t error);
+bool gpgpu_simx_init(GPGPUState *s, Error **errp);
+void gpgpu_simx_fini(GPGPUState *s);
 
 #endif /* HW_GPGPU_H */

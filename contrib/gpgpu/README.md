@@ -1,5 +1,8 @@
 # Educational GPGPU SDK
 
+For the real Vortex simx backend, PoCL/OpenCL pipeline and ArceOS/rCore
+clients, see [advanced experiment 2](vortex/README.md).
+
 This SDK runs compiled RV32 C++ kernels through a real Linux PCI driver and
 `libgpgpu`. It implements advanced experiment 1. The driver uses a coherent DMA
 staging buffer, completion interrupts, a page-granular VRAM allocator, and an
